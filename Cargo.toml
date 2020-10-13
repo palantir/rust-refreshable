@@ -1,0 +1,13 @@
+[package]
+name = "refreshable"
+version = "1.0.0"
+authors = ["Steven Fackler <sfackler@palantir.com>"]
+edition = "2018"
+license = "Apache-2.0"
+description = "A simple wrapper around a value that changes over time."
+repository = "https://github.com/palantir/rust-refreshable"
+readme = "README.md"
+
+[dependencies]
+arc-swap = "0.4"
+parking_lot = "0.11"
