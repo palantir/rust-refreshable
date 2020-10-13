@@ -1,0 +1,167 @@
+use crate::Refreshable;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
+
+#[test]
+fn subscribe_unsubscribe() {
+    let (refreshable, mut handle) = Refreshable::<i32, ()>::new(1);
+    assert_eq!(*refreshable.get(), 1);
+
+    let value = Arc::new(AtomicI32::new(0));
+    let subscription = refreshable.subscribe_ok({
+        let value = value.clone();
+        move |new_value| value.store(*new_value, Ordering::SeqCst)
+    });
+
+    assert_eq!(value.load(Ordering::SeqCst), 1);
+
+    handle.refresh(2).unwrap();
+    assert_eq!(value.load(Ordering::SeqCst), 2);
+
+    subscription.unsubscribe();
+
+    handle.refresh(3).unwrap();
+    assert_eq!(value.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn error_on_subscribe_doesnt_stay() {
+    let (refreshable, mut handle) = Refreshable::new(1);
+
+    let calls = Arc::new(AtomicI32::new(0));
+    refreshable
+        .subscribe({
+            let calls = calls.clone();
+            move |_| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err("bang")
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .err()
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    handle.refresh(2).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn equal_refresh_is_noop() {
+    let (refreshable, mut handle) = Refreshable::<i32, ()>::new(1);
+
+    let calls = Arc::new(AtomicI32::new(0));
+    refreshable.subscribe_ok({
+        let calls = calls.clone();
+        move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    handle.refresh(1).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn map_basics() {
+    let (refreshable, mut handle) = Refreshable::<i32, ()>::new(1);
+
+    let nested = refreshable.map(|value| *value * 2);
+    assert_eq!(*nested.get(), 2);
+
+    let root_value = Arc::new(AtomicI32::new(0));
+    refreshable.subscribe_ok({
+        let root_value = root_value.clone();
+        move |new_value| root_value.store(*new_value, Ordering::SeqCst)
+    });
+
+    let nested_value = Arc::new(AtomicI32::new(0));
+    nested.subscribe_ok({
+        let nested_value = nested_value.clone();
+        move |new_value| nested_value.store(*new_value, Ordering::SeqCst)
+    });
+
+    handle.refresh(3).unwrap();
+    assert_eq!(root_value.load(Ordering::SeqCst), 3);
+    assert_eq!(nested_value.load(Ordering::SeqCst), 6);
+    assert_eq!(*refreshable.get(), 3);
+    assert_eq!(*nested.get(), 6);
+}
+
+#[test]
+fn map_error_propagation() {
+    let (refreshable, mut handle) = Refreshable::new(1);
+
+    let nested = refreshable.map(|value| *value * 2);
+
+    let count = AtomicI32::new(0);
+    refreshable
+        .subscribe(move |_| {
+            if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                Err("boom")
+            }
+        })
+        .unwrap();
+
+    let count = AtomicI32::new(0);
+    nested
+        .subscribe(move |_| {
+            if count.fetch_add(1, Ordering::SeqCst) <= 1 {
+                Ok(())
+            } else {
+                Err("boom")
+            }
+        })
+        .unwrap();
+
+    let errors = handle.refresh(2).err().unwrap();
+    assert_eq!(errors.len(), 1);
+
+    let errors = handle.refresh(1).err().unwrap();
+    assert_eq!(errors.len(), 2);
+}
+
+#[test]
+fn map_callback_cleanup() {
+    let (refreshable, mut handle) = Refreshable::<i32, ()>::new(1);
+    refreshable.map(|v| *v);
+    assert!(refreshable.shared.callbacks.lock().is_empty());
+
+    let nested = refreshable.map(|v| *v);
+
+    let value = Arc::new(AtomicI32::new(0));
+    let subscription = nested.subscribe_ok({
+        let value = value.clone();
+        move |new_value| value.store(*new_value, Ordering::SeqCst)
+    });
+
+    drop(nested);
+
+    handle.refresh(2).unwrap();
+    assert_eq!(value.load(Ordering::SeqCst), 2);
+
+    subscription.unsubscribe();
+    assert!(refreshable.shared.callbacks.lock().is_empty());
+}
+
+#[test]
+fn errors_are_stable() {
+    let (refreshable, mut handle) = Refreshable::new(0);
+    refreshable
+        .subscribe(|v| {
+            if *v % 2 == 0 {
+                Ok(())
+            } else {
+                Err("value is odd")
+            }
+        })
+        .unwrap();
+
+    handle.refresh(1).err().unwrap();
+    handle.refresh(1).err().unwrap();
+}
