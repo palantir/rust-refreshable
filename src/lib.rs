@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //! A simple wrapper around a value that changes over time.
-#![warn(clippy::all)]
+#![doc(html_root_url = "https://docs.rs/refreshable/1")]
+#![warn(clippy::all, missing_docs)]
 
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
