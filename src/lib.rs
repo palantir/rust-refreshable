@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //! A simple wrapper around a value that changes over time.
+#![warn(clippy::all)]
+
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -38,6 +40,7 @@ struct Shared<T, E> {
     // could miss updates that happen after the subscription is called with the "current" value but before it is
     // inserted in the callbacks map.
     update_lock: Mutex<()>,
+    #[allow(clippy::type_complexity)]
     callbacks: Mutex<Arc<HashMap<u64, Arc<Callback<T, E>>>>>,
 }
 
