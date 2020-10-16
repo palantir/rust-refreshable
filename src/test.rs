@@ -31,7 +31,7 @@ fn subscribe_unsubscribe() {
     handle.refresh(2).unwrap();
     assert_eq!(value.load(Ordering::SeqCst), 2);
 
-    subscription.unsubscribe();
+    drop(subscription);
 
     handle.refresh(3).unwrap();
     assert_eq!(value.load(Ordering::SeqCst), 2);
@@ -66,12 +66,14 @@ fn equal_refresh_is_noop() {
     let (refreshable, mut handle) = Refreshable::<i32, ()>::new(1);
 
     let calls = Arc::new(AtomicI32::new(0));
-    refreshable.subscribe_ok({
-        let calls = calls.clone();
-        move |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-        }
-    });
+    refreshable
+        .subscribe_ok({
+            let calls = calls.clone();
+            move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .leak();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     handle.refresh(1).unwrap();
@@ -86,16 +88,20 @@ fn map_basics() {
     assert_eq!(*nested.get(), 2);
 
     let root_value = Arc::new(AtomicI32::new(0));
-    refreshable.subscribe_ok({
-        let root_value = root_value.clone();
-        move |new_value| root_value.store(*new_value, Ordering::SeqCst)
-    });
+    refreshable
+        .subscribe_ok({
+            let root_value = root_value.clone();
+            move |new_value| root_value.store(*new_value, Ordering::SeqCst)
+        })
+        .leak();
 
     let nested_value = Arc::new(AtomicI32::new(0));
-    nested.subscribe_ok({
-        let nested_value = nested_value.clone();
-        move |new_value| nested_value.store(*new_value, Ordering::SeqCst)
-    });
+    nested
+        .subscribe_ok({
+            let nested_value = nested_value.clone();
+            move |new_value| nested_value.store(*new_value, Ordering::SeqCst)
+        })
+        .leak();
 
     handle.refresh(3).unwrap();
     assert_eq!(root_value.load(Ordering::SeqCst), 3);
@@ -119,7 +125,8 @@ fn map_error_propagation() {
                 Err("boom")
             }
         })
-        .unwrap();
+        .unwrap()
+        .leak();
 
     let count = AtomicI32::new(0);
     nested
@@ -130,7 +137,8 @@ fn map_error_propagation() {
                 Err("boom")
             }
         })
-        .unwrap();
+        .unwrap()
+        .leak();
 
     let errors = handle.refresh(2).err().unwrap();
     assert_eq!(errors.len(), 1);
@@ -158,7 +166,7 @@ fn map_callback_cleanup() {
     handle.refresh(2).unwrap();
     assert_eq!(value.load(Ordering::SeqCst), 2);
 
-    subscription.unsubscribe();
+    drop(subscription);
     assert!(refreshable.shared.callbacks.lock().is_empty());
 }
 
@@ -173,7 +181,8 @@ fn errors_are_stable() {
                 Err("value is odd")
             }
         })
-        .unwrap();
+        .unwrap()
+        .leak();
 
     handle.refresh(1).err().unwrap();
     handle.refresh(1).err().unwrap();

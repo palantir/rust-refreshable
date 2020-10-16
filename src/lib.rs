@@ -12,6 +12,85 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //! A simple wrapper around a value that changes over time.
+//!
+//! A `Refreshable` provides access to both the current value and also ways to be notified of changes made in the
+//! future. Users can *subscribe* to the refreshable, registering a callback which is invoked whenever the value
+//! changes. Additionally, users can *map* a refreshable of one type to a refreshable of another type, with the new
+//! refreshable being updated based on changes to the original refreshable. For example, a caching component of a
+//! service may map a `Refreshable<ServiceConfiguration>` down to a `Refreshable<CacheConfiguration>` so it can
+//! subscribe specifically to only the configuration changes that matter to it.
+//!
+//! A `Subscription` is returned when subscribing to a refreshable which acts as a guard type, unregistering the
+//! subscription when dropped. If you intend the subscription to last for the lifetime of the refreshable, you can use
+//! the `Subscription::leak` method to allow the `Subscription` to fall out of scope without unregistering.
+//!
+//! A `RefreshHandle` is returned when creating a new `Refreshable` which is used to update its value. Subscriptions
+//! are fallible, and all errors encountered when running subscriptions in response to an update are reported through
+//! the `RefreshHandle::refresh` method.
+//!
+//! # Examples
+//!
+//! ```
+//! use refreshable::Refreshable;
+//!
+//! #[derive(PartialEq)]
+//! struct ServiceConfiguration {
+//!     cache: CacheConfiguration,
+//!     some_other_thing: u32,
+//! }
+//!
+//! #[derive(PartialEq, Clone)]
+//! struct CacheConfiguration {
+//!     size: usize,
+//! }
+//!
+//! let initial_config = ServiceConfiguration {
+//!     cache: CacheConfiguration {
+//!         size: 10,
+//!     },
+//!     some_other_thing: 5,
+//! };
+//! let (refreshable, mut handle) = Refreshable::new(initial_config);
+//!
+//! let cache_refreshable = refreshable.map(|config| config.cache.clone());
+//!
+//! let subscription = cache_refreshable.subscribe(|cache| {
+//!     if cache.size == 0 {
+//!         Err("cache size must be positive")
+//!     } else {
+//!         println!("new cache size is {}", cache.size);
+//!         Ok(())
+//!     }
+//! }).unwrap();
+//!
+//! let new_config = ServiceConfiguration {
+//!     cache: CacheConfiguration {
+//!         size: 20,
+//!     },
+//!     some_other_thing: 5,
+//! };
+//! // "new cache size is 20" is printed.
+//! handle.refresh(new_config).unwrap();
+//!
+//! let new_config = ServiceConfiguration {
+//!     cache: CacheConfiguration {
+//!         size: 20,
+//!     },
+//!     some_other_thing: 10,
+//! };
+//! // nothing is printed since the cache configuration did not change.
+//! handle.refresh(new_config).unwrap();
+//!
+//! drop(subscription);
+//! let new_config = ServiceConfiguration {
+//!     cache: CacheConfiguration {
+//!         size: 0,
+//!     },
+//!     some_other_thing: 10,
+//! };
+//! // nothing is printed since the the cache subscription was dropped.
+//! handle.refresh(new_config).unwrap();
+//! ```
 #![doc(html_root_url = "https://docs.rs/refreshable/1")]
 #![warn(clippy::all, missing_docs)]
 
@@ -46,18 +125,11 @@ struct Shared<T, E> {
 }
 
 /// A wrapper around a live-refreshable value.
-///
-/// It allows users to look at the current value, register callbacks that are invoked when the value changes, and to
-/// create new refreshables by applying a mapping function (e.g. to go from a `Refreshable<MyConfiguration>` to a
-/// `Refreshable<MySubcomponentConfiguration>`.
-///
-/// It is additionally parameterized by an error type which allows subscriptions to report errors when the value is
-/// refreshed.
 pub struct Refreshable<T, E> {
     shared: Arc<Shared<T, E>>,
     next_id: AtomicU64,
     // This is used to unsubscribe a mapped refreshable from its parent refreshable. A copy of the Arc is held in the
-    // refreshable itself, along with every subscription of the mapped refreshable. The inner dyn Drop is a MapCleanup
+    // refreshable itself, along with every subscription of the mapped refreshable. The inner dyn Drop is a Subscription
     // type.
     cleanup: Option<Arc<dyn Drop + Sync + Send>>,
 }
@@ -98,7 +170,7 @@ where
     ///
     /// The callback will be invoked every time the refreshable's value changes, and is also called synchronously when
     /// this method is called with the current value. If the callback returns `Ok`, a `Subscription` object is returned
-    /// that can be used to unsubscribe from the refreshable. If the callback returns `Err`, this method will return
+    /// that will unsubscribe from the refreshable when it drops. If the callback returns `Err`, this method will return
     /// the error and the callback will *not* be invoked on updates to the value.
     pub fn subscribe<F>(&self, callback: F) -> Result<Subscription<T, E>, E>
     where
@@ -146,6 +218,7 @@ where
         Subscription {
             shared: self.shared.clone(),
             id,
+            live: true,
         }
     }
 
@@ -163,24 +236,34 @@ where
         let (mut refreshable, handle) = Refreshable::new(map(&self.get()));
         let subscription =
             self.subscribe_raw(move |value, errors| handle.refresh_raw(map(value), errors));
-        refreshable.cleanup = Some(Arc::new(MapCleanup(subscription)));
+        refreshable.cleanup = Some(Arc::new(subscription));
         refreshable
     }
 }
 
 /// A subscription to a `Refreshable` value.
+///
+/// The associated subscription is unregistered when this value is dropped, unless the `Subscription::leak` method is
+/// used.
+#[must_use = "the associated subscription is unregistered when this value is dropped"]
 pub struct Subscription<T, E> {
     shared: Arc<Shared<T, E>>,
     id: u64,
+    live: bool,
+}
+
+impl<T, E> Drop for Subscription<T, E> {
+    fn drop(&mut self) {
+        if self.live {
+            Arc::make_mut(&mut *self.shared.callbacks.lock()).remove(&self.id);
+        }
+    }
 }
 
 impl<T, E> Subscription<T, E> {
-    /// Unsubscribes from the refreshable.
-    ///
-    /// The subscription's callback will be removed from the refreshable's state, and will no longer be called when the
-    /// refreshable's value changes.
-    pub fn unsubscribe(&self) {
-        Arc::make_mut(&mut *self.shared.callbacks.lock()).remove(&self.id);
+    /// Destroys the guard without unregistering its associated subscription.
+    pub fn leak(mut self) {
+        self.live = false;
     }
 }
 
@@ -243,13 +326,5 @@ impl<T> Deref for Guard<'_, T> {
     #[inline]
     fn deref(&self) -> &T {
         &*self.inner
-    }
-}
-
-struct MapCleanup<T, E>(Subscription<T, E>);
-
-impl<T, E> Drop for MapCleanup<T, E> {
-    fn drop(&mut self) {
-        self.0.unsubscribe();
     }
 }
