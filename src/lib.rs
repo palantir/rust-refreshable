@@ -97,6 +97,7 @@
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -163,6 +164,7 @@ where
     pub fn get(&self) -> Guard<'_, T> {
         Guard {
             inner: self.shared.value.load(),
+            _p: PhantomData,
         }
     }
 
@@ -317,7 +319,9 @@ where
 
 /// A guard type providing access to a snapshot of a refreshable's current value.
 pub struct Guard<'a, T> {
-    inner: arc_swap::Guard<'a, Arc<T>>,
+    inner: arc_swap::Guard<Arc<T>>,
+    // the arc_swap guard doesn't borrow from its ArcSwap, but we don't want to expose that fact in the public API
+    _p: PhantomData<&'a ()>,
 }
 
 impl<T> Deref for Guard<'_, T> {

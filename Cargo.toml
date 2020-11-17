@@ -9,5 +9,5 @@ repository = "https://github.com/palantir/rust-refreshable"
 readme = "README.md"
 
 [dependencies]
-arc-swap = "0.4"
+arc-swap = "1.0"
 parking_lot = "0.11"
