@@ -105,8 +105,12 @@ use std::sync::Arc;
 #[cfg(test)]
 mod test;
 
+trait Cleanup {}
+
+impl<T, E> Cleanup for Subscription<T, E> {}
+
 struct RawCallback<F: ?Sized> {
-    _cleanup: Option<Arc<dyn Drop + Sync + Send>>,
+    _cleanup: Option<Arc<dyn Cleanup + Sync + Send>>,
     // We need to run failing callbacks again on a refresh even if the value didn't change. Otherwise, you can "lose"
     // errors when the refreshable update to the same value.
     ok: AtomicBool,
@@ -132,7 +136,7 @@ pub struct Refreshable<T, E> {
     // This is used to unsubscribe a mapped refreshable from its parent refreshable. A copy of the Arc is held in the
     // refreshable itself, along with every subscription of the mapped refreshable. The inner dyn Drop is a Subscription
     // type.
-    cleanup: Option<Arc<dyn Drop + Sync + Send>>,
+    cleanup: Option<Arc<dyn Cleanup + Sync + Send>>,
 }
 
 impl<T, E> Refreshable<T, E>
