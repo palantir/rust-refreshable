@@ -99,7 +99,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -113,11 +113,11 @@ struct RawCallback<F: ?Sized> {
     _cleanup: Option<Arc<dyn Cleanup + Sync + Send>>,
     // We need to run failing callbacks again on a refresh even if the value didn't change. Otherwise, you can "lose"
     // errors when the refreshable update to the same value.
-    ok: AtomicBool,
+    ok: bool,
     callback: F,
 }
 
-type Callback<T, E> = RawCallback<dyn Fn(&T, &mut Vec<E>) + Sync + Send>;
+type Callback<T, E> = RawCallback<dyn FnMut(&T, &mut Vec<E>) + Sync + Send>;
 
 struct Shared<T, E> {
     value: ArcSwap<T>,
@@ -125,8 +125,10 @@ struct Shared<T, E> {
     // could miss updates that happen after the subscription is called with the "current" value but before it is
     // inserted in the callbacks map.
     update_lock: Mutex<()>,
+    // This is a nested mess of mutexes and arcs to allow us to process callbacks while allowing subscription
+    // modifications. Otherwise, a subscription that tried to unsubscribe itself would deadlock.
     #[allow(clippy::type_complexity)]
-    callbacks: Mutex<Arc<HashMap<u64, Arc<Callback<T, E>>>>>,
+    callbacks: Mutex<Arc<HashMap<u64, Arc<Mutex<Callback<T, E>>>>>>,
 }
 
 /// A wrapper around a live-refreshable value.
@@ -178,9 +180,9 @@ where
     /// this method is called with the current value. If the callback returns `Ok`, a `Subscription` object is returned
     /// that will unsubscribe from the refreshable when it drops. If the callback returns `Err`, this method will return
     /// the error and the callback will *not* be invoked on updates to the value.
-    pub fn subscribe<F>(&self, callback: F) -> Result<Subscription<T, E>, E>
+    pub fn subscribe<F>(&self, mut callback: F) -> Result<Subscription<T, E>, E>
     where
-        F: Fn(&T) -> Result<(), E> + 'static + Sync + Send,
+        F: FnMut(&T) -> Result<(), E> + 'static + Sync + Send,
     {
         let _guard = self.shared.update_lock.lock();
         callback(&self.get())?;
@@ -197,9 +199,9 @@ where
     /// Subscribes to the refreshable with an infallible callback.
     ///
     /// This is a convenience method to simplify subscription when the callback can never fail.
-    pub fn subscribe_ok<F>(&self, callback: F) -> Subscription<T, E>
+    pub fn subscribe_ok<F>(&self, mut callback: F) -> Subscription<T, E>
     where
-        F: Fn(&T) + 'static + Sync + Send,
+        F: FnMut(&T) + 'static + Sync + Send,
     {
         self.subscribe(move |value| {
             callback(value);
@@ -211,14 +213,14 @@ where
 
     fn subscribe_raw<F>(&self, callback: F) -> Subscription<T, E>
     where
-        F: Fn(&T, &mut Vec<E>) + 'static + Sync + Send,
+        F: FnMut(&T, &mut Vec<E>) + 'static + Sync + Send,
     {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let callback = Arc::new(RawCallback {
+        let callback = Arc::new(Mutex::new(RawCallback {
             _cleanup: self.cleanup.clone(),
-            ok: AtomicBool::new(true),
+            ok: true,
             callback,
-        });
+        }));
         Arc::make_mut(&mut *self.shared.callbacks.lock()).insert(id, callback);
 
         Subscription {
@@ -233,13 +235,13 @@ where
     /// This can be used to narrow the scope of the refreshable value. Updates to the initial refreshable value will
     /// propagate to the mapped refreshable value, but the mapped refreshable's subscriptions will only be invoked if
     /// the mapped value actually changed.
-    pub fn map<F, R>(&self, map: F) -> Refreshable<R, E>
+    pub fn map<F, R>(&self, mut map: F) -> Refreshable<R, E>
     where
-        F: Fn(&T) -> R + 'static + Sync + Send,
+        F: FnMut(&T) -> R + 'static + Sync + Send,
         R: PartialEq + 'static + Sync + Send,
     {
         let _guard = self.shared.update_lock.lock();
-        let (mut refreshable, handle) = Refreshable::new(map(&self.get()));
+        let (mut refreshable, mut handle) = Refreshable::new(map(&self.get()));
         let subscription =
             self.subscribe_raw(move |value, errors| handle.refresh_raw(map(value), errors));
         refreshable.cleanup = Some(Arc::new(subscription));
@@ -287,8 +289,7 @@ where
     /// If the new value is equal to the refreshable's current value, the method returns immediately. Otherwise, it
     /// runs all registered subscriptions, collecting any errors and returning them all when finished.
     // NB: It's important that this takes &mut self. That way, all the way down through the tree of mapped refreshables,
-    // we don't need to worry about concurrent refreshes. refresh_raw below only takes &self to work more easily with
-    // the map implementation, but that's only triggered by a call to refresh at the root refreshable.
+    // we don't need to worry about concurrent refreshes.
     pub fn refresh(&mut self, new_value: T) -> Result<(), Vec<E>> {
         let mut errors = vec![];
 
@@ -301,7 +302,7 @@ where
         }
     }
 
-    fn refresh_raw(&self, new_value: T, errors: &mut Vec<E>) {
+    fn refresh_raw(&mut self, new_value: T, errors: &mut Vec<E>) {
         // We could avoid updating the inner value when it hasn't changed but the complexity doesn't seem worth it.
         let value_changed = new_value != **self.shared.value.load();
 
@@ -312,10 +313,11 @@ where
         drop(guard);
 
         for callback in callbacks.values() {
-            if value_changed || !callback.ok.load(Ordering::SeqCst) {
+            let mut callback = callback.lock();
+            if value_changed || !callback.ok {
                 let nerrors = errors.len();
                 (callback.callback)(&value, errors);
-                callback.ok.store(errors.len() == nerrors, Ordering::SeqCst);
+                callback.ok = errors.len() == nerrors;
             }
         }
     }
