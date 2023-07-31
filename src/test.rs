@@ -187,3 +187,35 @@ fn errors_are_stable() {
     handle.refresh(1).err().unwrap();
     handle.refresh(1).err().unwrap();
 }
+
+#[test]
+fn chained_errors_are_stable() {
+    let (refreshable, mut handle) = Refreshable::new(0);
+    refreshable
+        .map(|v| *v)
+        .subscribe(|v| {
+            if *v % 2 == 0 {
+                Ok(())
+            } else {
+                Err("value is odd")
+            }
+        })
+        .unwrap()
+        .leak();
+
+    handle.refresh(1).err().unwrap();
+    handle.refresh(1).err().unwrap();
+}
+
+#[test]
+fn error_mapping() {
+    let (refreshable, mut handle) = Refreshable::<i32, String>::new(0);
+    refreshable
+        .try_map_full(|v| Ok::<_, i32>(*v), |e| e.to_string())
+        .unwrap()
+        .subscribe(|v| if *v % 2 == 0 { Ok(()) } else { Err(1) })
+        .unwrap()
+        .leak();
+
+    assert_eq!(handle.refresh(1).err().unwrap(), vec!["1".to_string()]);
+}

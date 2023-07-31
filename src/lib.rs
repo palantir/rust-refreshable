@@ -109,6 +109,54 @@ trait Cleanup {}
 
 impl<T, E> Cleanup for Subscription<T, E> {}
 
+trait CollectErrors<E> {
+    fn push(&mut self, error: E);
+
+    fn len(&self) -> usize;
+}
+
+impl<T, E> CollectErrors<E> for &'_ mut T
+where
+    T: ?Sized + CollectErrors<E>,
+{
+    fn push(&mut self, error: E) {
+        (**self).push(error)
+    }
+
+    fn len(&self) -> usize {
+        (**self).len()
+    }
+}
+
+impl<E> CollectErrors<E> for Vec<E> {
+    fn push(&mut self, error: E) {
+        self.push(error);
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+struct MappingErrorCollector<T, F> {
+    inner: T,
+    map: F,
+}
+
+impl<T, F, E1, E2> CollectErrors<E2> for MappingErrorCollector<T, F>
+where
+    T: CollectErrors<E1>,
+    F: FnMut(E2) -> E1,
+{
+    fn push(&mut self, error: E2) {
+        self.inner.push((self.map)(error));
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
 struct RawCallback<F: ?Sized> {
     _cleanup: Option<Arc<dyn Cleanup + Sync + Send>>,
     // We need to run failing callbacks again on a refresh even if the value didn't change. Otherwise, you can "lose"
@@ -117,7 +165,7 @@ struct RawCallback<F: ?Sized> {
     callback: F,
 }
 
-type Callback<T, E> = RawCallback<dyn FnMut(&T, &mut Vec<E>) + Sync + Send>;
+type Callback<T, E> = RawCallback<dyn FnMut(&T, &mut dyn CollectErrors<E>) + Sync + Send>;
 
 struct Shared<T, E> {
     value: ArcSwap<T>,
@@ -213,7 +261,7 @@ where
 
     fn subscribe_raw<F>(&self, callback: F) -> Subscription<T, E>
     where
-        F: FnMut(&T, &mut Vec<E>) + 'static + Sync + Send,
+        F: FnMut(&T, &mut dyn CollectErrors<E>) + 'static + Sync + Send,
     {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let callback = Arc::new(Mutex::new(RawCallback {
@@ -232,20 +280,68 @@ where
 
     /// Creates a new refreshable from this one by applying a mapping function to the value.
     ///
-    /// This can be used to narrow the scope of the refreshable value. Updates to the initial refreshable value will
-    /// propagate to the mapped refreshable value, but the mapped refreshable's subscriptions will only be invoked if
-    /// the mapped value actually changed.
+    /// This is a convenience method to simplify mapping when the function can never fail.
     pub fn map<F, R>(&self, mut map: F) -> Refreshable<R, E>
     where
         F: FnMut(&T) -> R + 'static + Sync + Send,
         R: PartialEq + 'static + Sync + Send,
     {
+        self.try_map(move |v| Ok(map(v))).ok().unwrap()
+    }
+
+    /// Creates a new refreshable from this one by applying a fallible mapping function to the value.
+    ///
+    /// This can be used to narrow the scope of the refreshable value. Updates to the initial refreshable value will
+    /// propagate to the mapped refreshable value, but the mapped refreshable's subscriptions will only be invoked if
+    /// the mapped value actually changed.
+    pub fn try_map<F, R>(&self, mut map: F) -> Result<Refreshable<R, E>, E>
+    where
+        F: FnMut(&T) -> Result<R, E> + 'static + Sync + Send,
+        R: PartialEq + 'static + Sync + Send,
+    {
+        // Unfortunately basically identical to try_map_full, but we don't want to add unnecessary
+        // levels of recursion to the error collector.
         let _guard = self.shared.update_lock.lock();
-        let (mut refreshable, mut handle) = Refreshable::new(map(&self.get()));
-        let subscription =
-            self.subscribe_raw(move |value, errors| handle.refresh_raw(map(value), errors));
+        let (mut refreshable, mut handle) = Refreshable::new(map(&self.get())?);
+        let subscription = self.subscribe_raw(move |value, errors| match map(value) {
+            Ok(value) => handle.refresh_raw(value, errors),
+            Err(e) => errors.push(e),
+        });
         refreshable.cleanup = Some(Arc::new(subscription));
-        refreshable
+        Ok(refreshable)
+    }
+
+    /// Creates a new refreshable by this one by applying mapping functions to both the input value
+    /// and returned errors.
+    ///
+    /// Updates to the initial refreshable value will propagate to the mapped refreshable value,
+    /// but the mapped refreshable's subscription will only be invoked if the mapped value actually
+    /// changed.
+    pub fn try_map_full<F, G, T2, E2>(
+        &self,
+        mut map: F,
+        mut error_map: G,
+    ) -> Result<Refreshable<T2, E2>, E2>
+    where
+        F: FnMut(&T) -> Result<T2, E2> + 'static + Sync + Send,
+        G: FnMut(E2) -> E + 'static + Sync + Send,
+        T2: PartialEq + 'static + Sync + Send,
+        E2: 'static,
+    {
+        let _guard = self.shared.update_lock.lock();
+        let (mut refreshable, mut handle) = Refreshable::new(map(&self.get())?);
+        let subscription = self.subscribe_raw(move |value, errors| {
+            let mut mapped_errors = MappingErrorCollector {
+                inner: errors,
+                map: &mut error_map,
+            };
+            match map(value) {
+                Ok(value) => handle.refresh_raw(value, &mut mapped_errors),
+                Err(e) => mapped_errors.push(e),
+            }
+        });
+        refreshable.cleanup = Some(Arc::new(subscription));
+        Ok(refreshable)
     }
 }
 
@@ -302,7 +398,7 @@ where
         }
     }
 
-    fn refresh_raw(&mut self, new_value: T, errors: &mut Vec<E>) {
+    fn refresh_raw(&mut self, new_value: T, errors: &mut dyn CollectErrors<E>) {
         // We could avoid updating the inner value when it hasn't changed but the complexity doesn't seem worth it.
         let value_changed = new_value != **self.shared.value.load();
 
@@ -335,6 +431,6 @@ impl<T> Deref for Guard<'_, T> {
 
     #[inline]
     fn deref(&self) -> &T {
-        &*self.inner
+        &self.inner
     }
 }
