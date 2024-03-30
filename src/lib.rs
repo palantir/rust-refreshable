@@ -54,7 +54,7 @@
 //!
 //! let cache_refreshable = refreshable.map(|config| config.cache.clone());
 //!
-//! let subscription = cache_refreshable.subscribe(|cache| {
+//! let subscription = cache_refreshable.try_subscribe(|cache| {
 //!     if cache.size == 0 {
 //!         Err("cache size must be positive")
 //!     } else {
