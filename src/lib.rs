@@ -195,7 +195,8 @@ where
     /// The callback will be invoked every time the refreshable's value changes, and is also called synchronously when
     /// this method is called with the current value. If the callback returns `Ok`, a `Subscription` object is returned
     /// that will unsubscribe from the refreshable when it drops. If the callback returns `Err`, this method will return
-    /// the error and the callback will *not* be invoked on updates to the value.
+    /// the error and the callback will *not* be invoked on updates to the value. Errors in subsequent invocations will
+    /// be propagated to the originating [`RefreshHandle::refresh`] call.
     pub fn try_subscribe<F>(&self, mut callback: F) -> Result<Subscription<T, E>, E>
     where
         F: FnMut(&T) -> Result<(), E> + 'static + Sync + Send,
