@@ -21,7 +21,7 @@ fn subscribe_unsubscribe() {
     assert_eq!(*refreshable.get(), 1);
 
     let value = Arc::new(AtomicI32::new(0));
-    let subscription = refreshable.subscribe_ok({
+    let subscription = refreshable.subscribe({
         let value = value.clone();
         move |new_value| value.store(*new_value, Ordering::SeqCst)
     });
@@ -43,7 +43,7 @@ fn error_on_subscribe_doesnt_stay() {
 
     let calls = Arc::new(AtomicI32::new(0));
     refreshable
-        .subscribe({
+        .try_subscribe({
             let calls = calls.clone();
             move |_| {
                 if calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -67,7 +67,7 @@ fn equal_refresh_is_noop() {
 
     let calls = Arc::new(AtomicI32::new(0));
     refreshable
-        .subscribe_ok({
+        .subscribe({
             let calls = calls.clone();
             move |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -89,7 +89,7 @@ fn map_basics() {
 
     let root_value = Arc::new(AtomicI32::new(0));
     refreshable
-        .subscribe_ok({
+        .subscribe({
             let root_value = root_value.clone();
             move |new_value| root_value.store(*new_value, Ordering::SeqCst)
         })
@@ -97,7 +97,7 @@ fn map_basics() {
 
     let nested_value = Arc::new(AtomicI32::new(0));
     nested
-        .subscribe_ok({
+        .subscribe({
             let nested_value = nested_value.clone();
             move |new_value| nested_value.store(*new_value, Ordering::SeqCst)
         })
@@ -118,7 +118,7 @@ fn map_error_propagation() {
 
     let count = AtomicI32::new(0);
     refreshable
-        .subscribe(move |_| {
+        .try_subscribe(move |_| {
             if count.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(())
             } else {
@@ -130,7 +130,7 @@ fn map_error_propagation() {
 
     let count = AtomicI32::new(0);
     nested
-        .subscribe(move |_| {
+        .try_subscribe(move |_| {
             if count.fetch_add(1, Ordering::SeqCst) <= 1 {
                 Ok(())
             } else {
@@ -156,7 +156,7 @@ fn map_callback_cleanup() {
     let nested = refreshable.map(|v| *v);
 
     let value = Arc::new(AtomicI32::new(0));
-    let subscription = nested.subscribe_ok({
+    let subscription = nested.subscribe({
         let value = value.clone();
         move |new_value| value.store(*new_value, Ordering::SeqCst)
     });
@@ -174,7 +174,7 @@ fn map_callback_cleanup() {
 fn errors_are_stable() {
     let (refreshable, mut handle) = Refreshable::new(0);
     refreshable
-        .subscribe(|v| {
+        .try_subscribe(|v| {
             if *v % 2 == 0 {
                 Ok(())
             } else {

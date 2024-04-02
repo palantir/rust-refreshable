@@ -54,7 +54,7 @@
 //!
 //! let cache_refreshable = refreshable.map(|config| config.cache.clone());
 //!
-//! let subscription = cache_refreshable.subscribe(|cache| {
+//! let subscription = cache_refreshable.try_subscribe(|cache| {
 //!     if cache.size == 0 {
 //!         Err("cache size must be positive")
 //!     } else {
@@ -174,13 +174,30 @@ where
         }
     }
 
-    /// Subscribes to the refreshable.
+    /// Subscribes to the refreshable with an infallible callback.
+    ///
+    /// The callback will be invoked every time the refreshable's value changes, and is also called synchronously when
+    /// this method is called with the current value.
+    pub fn subscribe<F>(&self, mut callback: F) -> Subscription<T, E>
+    where
+        F: FnMut(&T) + 'static + Sync + Send,
+    {
+        self.try_subscribe(move |value| {
+            callback(value);
+            Ok(())
+        })
+        .ok()
+        .unwrap()
+    }
+
+    /// Subscribes to the refreshable with a fallible callback.
     ///
     /// The callback will be invoked every time the refreshable's value changes, and is also called synchronously when
     /// this method is called with the current value. If the callback returns `Ok`, a `Subscription` object is returned
     /// that will unsubscribe from the refreshable when it drops. If the callback returns `Err`, this method will return
-    /// the error and the callback will *not* be invoked on updates to the value.
-    pub fn subscribe<F>(&self, mut callback: F) -> Result<Subscription<T, E>, E>
+    /// the error and the callback will *not* be invoked on updates to the value. Errors in subsequent invocations will
+    /// be propagated to the originating [`RefreshHandle::refresh`] call.
+    pub fn try_subscribe<F>(&self, mut callback: F) -> Result<Subscription<T, E>, E>
     where
         F: FnMut(&T) -> Result<(), E> + 'static + Sync + Send,
     {
@@ -194,21 +211,6 @@ where
         });
 
         Ok(subscription)
-    }
-
-    /// Subscribes to the refreshable with an infallible callback.
-    ///
-    /// This is a convenience method to simplify subscription when the callback can never fail.
-    pub fn subscribe_ok<F>(&self, mut callback: F) -> Subscription<T, E>
-    where
-        F: FnMut(&T) + 'static + Sync + Send,
-    {
-        self.subscribe(move |value| {
-            callback(value);
-            Ok(())
-        })
-        .ok()
-        .unwrap()
     }
 
     fn subscribe_raw<F>(&self, callback: F) -> Subscription<T, E>
@@ -240,12 +242,27 @@ where
         F: FnMut(&T) -> R + 'static + Sync + Send,
         R: PartialEq + 'static + Sync + Send,
     {
+        self.try_map(move |v| Ok(map(v))).ok().unwrap()
+    }
+
+    /// Creates a new refreshable from this one by applying a fallible mapping function to the value.
+    ///
+    /// This can be used to narrow the scope of the refreshable value. Updates to the initial refreshable value will
+    /// propagate to the mapped refreshable value, but the mapped refreshable's subscriptions will only be invoked if
+    /// the mapped value actually changed.
+    pub fn try_map<F, R>(&self, mut map: F) -> Result<Refreshable<R, E>, E>
+    where
+        F: FnMut(&T) -> Result<R, E> + 'static + Sync + Send,
+        R: PartialEq + 'static + Sync + Send,
+    {
         let _guard = self.shared.update_lock.lock();
-        let (mut refreshable, mut handle) = Refreshable::new(map(&self.get()));
-        let subscription =
-            self.subscribe_raw(move |value, errors| handle.refresh_raw(map(value), errors));
+        let (mut refreshable, mut handle) = Refreshable::new(map(&self.get())?);
+        let subscription = self.subscribe_raw(move |value, errors| match map(value) {
+            Ok(value) => handle.refresh_raw(value, errors),
+            Err(e) => errors.push(e),
+        });
         refreshable.cleanup = Some(Arc::new(subscription));
-        refreshable
+        Ok(refreshable)
     }
 }
 
@@ -335,6 +352,6 @@ impl<T> Deref for Guard<'_, T> {
 
     #[inline]
     fn deref(&self) -> &T {
-        &*self.inner
+        &self.inner
     }
 }
