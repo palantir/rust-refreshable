@@ -132,9 +132,10 @@ struct Shared<T, E> {
 }
 
 /// A wrapper around a live-refreshable value.
+#[derive(Clone)]
 pub struct Refreshable<T, E> {
     shared: Arc<Shared<T, E>>,
-    next_id: AtomicU64,
+    next_id: Arc<AtomicU64>,
     // This is used to unsubscribe a mapped refreshable from its parent refreshable. A copy of the Arc is held in the
     // refreshable itself, along with every subscription of the mapped refreshable. The inner dyn Drop is a Subscription
     // type.
@@ -154,11 +155,10 @@ where
             update_lock: Mutex::new(()),
             callbacks: Mutex::new(Arc::new(HashMap::new())),
         });
-
         (
             Refreshable {
                 shared: shared.clone(),
-                next_id: AtomicU64::new(0),
+                next_id: Arc::new(AtomicU64::new(0)),
                 cleanup: None,
             },
             RefreshHandle { shared },
